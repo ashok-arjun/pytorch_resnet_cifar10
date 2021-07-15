@@ -31,90 +31,77 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-
+import math
 from torch.autograd import Variable
+
+from torch.nn import Conv2d, BatchNorm2d, Linear
 
 __all__ = ['ResNet', 'resnet20', 'resnet32', 'resnet44', 'resnet56', 'resnet110', 'resnet1202']
 
-def _weights_init(m):
-    classname = m.__class__.__name__
-    #print(classname)
-    if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
-        init.kaiming_normal_(m.weight)
+def conv3x3(in_planes, out_planes, stride=1):
+    return Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
-class LambdaLayer(nn.Module):
-    def __init__(self, lambd):
-        super(LambdaLayer, self).__init__()
-        self.lambd = lambd
-
-    def forward(self, x):
-        return self.lambd(x)
-
-
-class BasicBlock(nn.Module):
+class BasicBlock(torch.nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1, option='A'):
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super().__init__()
+        self.layers = torch.nn.Sequential(
+            conv3x3(inplanes, planes, stride),
+            BatchNorm2d(planes),
+            torch.nn.ReLU(inplace=True),
 
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != planes:
-            if option == 'A':
-                """
-                For CIFAR10 ResNet paper uses option A.
-                """
-                self.shortcut = LambdaLayer(lambda x:
-                                            F.pad(x[:, :, ::2, ::2], (0, 0, 0, 0, planes//4, planes//4), "constant", 0))
-            elif option == 'B':
-                self.shortcut = nn.Sequential(
-                     nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
-                     nn.BatchNorm2d(self.expansion * planes)
-                )
+            conv3x3(planes, planes),
+            BatchNorm2d(planes),
+        )
+        self.downsample = downsample if downsample is not None else lambda x: x
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
-        return out
+        return F.relu(self.downsample(x) + self.layers(x), inplace=True)
 
+class ResNet(torch.nn.Module):
+    def __init__(self, block, num_blocks, num_classes = 10):
+        super().__init__()
+        self.inplanes = 16
+        self.features = torch.nn.Sequential(
+            Conv2d(3, 16, kernel_size=3, padding=1, bias=False),
+            BatchNorm2d(16),
+            torch.nn.ReLU(inplace=True),
+            self._make_layer(block, 16, num_blocks[0], stride=1),
+            self._make_layer(block, 32, num_blocks[1], stride=2),
+            self._make_layer(block, 64, num_blocks[2], stride=2)
+        )
 
-class ResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
-        super(ResNet, self).__init__()
-        self.in_planes = 16
+        self.out_layer = Linear(64 * BasicBlock.expansion, num_classes)
+        self.reset_parameters()
 
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.layer1 = self._make_layer(block, 16, num_blocks[0], stride=1)
-        self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
-        self.linear = nn.Linear(64, num_classes)
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, Conv2d):
+                n = m.weight.shape[-1] * m.weight.shape[-2] * m.weight.shape[0]
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
-        self.apply(_weights_init)
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = torch.nn.Sequential(
+                Conv2d(self.inplanes, planes * block.expansion,
+                       kernel_size=1, stride=stride, bias=False),
+                BatchNorm2d(planes * block.expansion),
+            )
 
-    def _make_layer(self, block, planes, num_blocks, stride):
-        strides = [stride] + [1]*(num_blocks-1)
-        layers = []
-        for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
-            self.in_planes = planes * block.expansion
+        layers = [block(self.inplanes, planes, stride, downsample)]
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
 
-        return nn.Sequential(*layers)
+        return torch.nn.Sequential(*layers)
 
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = F.avg_pool2d(out, out.size()[3])
-        out = out.view(out.size(0), -1)
-        out = self.linear(out)
-        return out
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.out_layer(self.features(x).mean(dim=(2, 3)))
 
 
 def resnet20():

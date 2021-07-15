@@ -1,0 +1,7 @@
+data/
+wandb/
+*.th
+*.pth
+*.tar
+*.pyc
+__pycache__

@@ -4,6 +4,7 @@ import shutil
 import time
 
 import torch
+from torch._C import device
 import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -12,6 +13,8 @@ import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import resnet
+
+import wandb
 
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
@@ -62,13 +65,14 @@ def main():
     global args, best_prec1
     args = parser.parse_args()
 
-
     # Check the save_dir exists or not
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
+    model = torch.nn.DataParallel(resnet.__dict__[args.arch](), device_ids=[0,1])
     model.cuda()
+
+    wandb.init(entity="arjunashok", project="pytorch_resnet_cifar10", config=vars(args))
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -135,15 +139,23 @@ def main():
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
+        
+        wandb.log({"train/lr": optimizer.param_groups[0]['lr'], "epoch": epoch})
+
         train(train_loader, model, criterion, optimizer, epoch)
         lr_scheduler.step()
 
         # evaluate on validation set
         prec1 = validate(val_loader, model, criterion)
 
+        wandb.log({"val/top_1": prec1, "epoch": epoch})
+
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
+
+        wandb.log({"val/best_top_1": best_prec1, "epoch": epoch})
+
 
         if epoch > 0 and epoch % args.save_every == 0:
             save_checkpoint({
@@ -210,6 +222,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                       epoch, i, len(train_loader), batch_time=batch_time,
                       data_time=data_time, loss=losses, top1=top1))
+
+            wandb.log({"train/loss": losses(), "train/top_1": top1()}, step=epoch*len(train_loader) + i+1)
 
 
 def validate(val_loader, model, criterion):
@@ -284,6 +298,9 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+    def __call__(self):
+        return self.avg
 
 
 def accuracy(output, target, topk=(1,)):
